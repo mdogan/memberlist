@@ -521,7 +521,7 @@ HANDLE_REMOTE_FAILURE:
 }
 
 // Ping initiates a ping to the node with the specified name.
-func (m *Memberlist) Ping(node string, addr net.Addr) (time.Duration, error) {
+func (m *Memberlist) Ping(node string, addr net.Addr) (time.Duration, []byte, error) {
 	// Prepare a ping message and setup an ack handler.
 	selfAddr, selfPort := m.getAdvertise()
 	ping := ping{
@@ -538,7 +538,7 @@ func (m *Memberlist) Ping(node string, addr net.Addr) (time.Duration, error) {
 
 	// Send a ping to the node.
 	if err := m.encodeAndSendMsg(a, pingMsg, &ping); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	// Mark the sent time here, which should be after any pre-processing and
@@ -550,14 +550,14 @@ func (m *Memberlist) Ping(node string, addr net.Addr) (time.Duration, error) {
 	select {
 	case v := <-ackCh:
 		if v.Complete {
-			return v.Timestamp.Sub(sent), nil
+			return v.Timestamp.Sub(sent), v.Payload, nil
 		}
 	case <-time.After(m.config.ProbeTimeout):
 		// Timeout, return an error below.
 	}
 
 	m.logger.Printf("[DEBUG] memberlist: Failed UDP ping: %v (timeout reached)", node)
-	return 0, NoPingResponseError{ping.Node}
+	return 0, nil, NoPingResponseError{ping.Node}
 }
 
 // resetNodes is used when the tick wraps around. It will reap the
