@@ -17,8 +17,9 @@ import (
 	"time"
 
 	"github.com/armon/go-metrics"
-	iretry "github.com/hashicorp/memberlist/internal/retry"
 	"github.com/stretchr/testify/require"
+
+	iretry "github.com/hashicorp/memberlist/internal/retry"
 )
 
 func HostMemberlist(host string, t *testing.T, f func(*Config)) *Memberlist {
@@ -1007,18 +1008,64 @@ func TestMemberList_Ping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	rtt, err := m1.Ping(n.Name, addr)
+	rtt, payload, err := m1.Ping(n.Name, addr)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if !(rtt > 0) {
 		t.Fatalf("bad: %v", rtt)
 	}
+	if payload != nil {
+		t.Fatalf("payload: %v", payload)
+	}
 
 	// This ping has a bad node name so should timeout.
-	_, err = m1.Ping("bad", addr)
+	_, _, err = m1.Ping("bad", addr)
 	if _, ok := err.(NoPingResponseError); !ok || err == nil {
 		t.Fatalf("bad: %v", err)
+	}
+}
+
+func TestMemberList_Ping_withPayload(t *testing.T) {
+	addr1 := getBindAddr()
+	addr2 := getBindAddr()
+	ip1 := []byte(addr1)
+	ip2 := []byte(addr2)
+
+	m1 := HostMemberlist(addr1.String(), t, func(c *Config) {
+		c.ProbeTimeout = 1 * time.Second
+		c.ProbeInterval = 10 * time.Second
+	})
+	defer m1.Shutdown()
+
+	bindPort := m1.config.BindPort
+
+	m2 := HostMemberlist(addr2.String(), t, func(c *Config) {
+		c.BindPort = bindPort
+		c.Ping = &MockPing{}
+	})
+	defer m2.Shutdown()
+
+	a1 := alive{Node: addr1.String(), Addr: ip1, Port: uint16(bindPort), Incarnation: 1}
+	m1.aliveNode(&a1, nil, true)
+	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1}
+	m1.aliveNode(&a2, nil, false)
+
+	// Do a legit ping.
+	n := m1.nodeMap[addr2.String()]
+	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(addr2.String(), strconv.Itoa(bindPort)))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	rtt, payload, err := m1.Ping(n.Name, addr)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !(rtt > 0) {
+		t.Fatalf("bad: %v", rtt)
+	}
+	if !bytes.Equal(payload, []byte(DEFAULT_PAYLOAD)) {
+		t.Fatalf("incorrect payload. expected: %v; actual: %v", []byte(DEFAULT_PAYLOAD), payload)
 	}
 }
 
