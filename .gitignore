@@ -23,3 +23,9 @@ coverage.out
 *.exe
 *.test
 .vagrant/
+
+.idea/
+.vscode
+.zed
+.claude
+.codex
