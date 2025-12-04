@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
 	"os"
 	"strconv"
@@ -640,13 +641,19 @@ func (m *Memberlist) NumMembers() (alive int) {
 // listeners, meaning the node will continue participating in gossip and state
 // updates.
 //
-// This will block until the leave message is successfully broadcasted to
-// a member of the cluster, if any exist or until a specified timeout
-// is reached.
+// The minNodes parameter specifies the minimum number of nodes that must
+// successfully receive the leave message. If minNodes is 0, the legacy
+// behavior is used (just queue for gossip broadcast). If minNodes > 0,
+// Leave will send the message directly via TCP to that many random nodes
+// and return an error if the minimum cannot be reached within the timeout.
+// The leave message is still queued for gossip broadcast for eventual consistency.
+//
+// This will block until the leave message requirements are met or the
+// timeout is reached.
 //
 // This method is safe to call multiple times, but must not be called
 // after the cluster is already shut down.
-func (m *Memberlist) Leave(timeout time.Duration) error {
+func (m *Memberlist) Leave(timeout time.Duration, minNodes int) error {
 	m.leaveLock.Lock()
 	defer m.leaveLock.Unlock()
 
@@ -676,12 +683,58 @@ func (m *Memberlist) Leave(timeout time.Duration) error {
 		}
 		m.deadNode(&d)
 
+		var timeoutCh <-chan time.Time
+		if timeout > 0 {
+			timeoutCh = time.After(timeout)
+		}
+
+		// If minNodes > 0, send directly to specific nodes via TCP
+		if minNodes > 0 {
+			members := m.Members()
+
+			// Determine how many nodes we can actually notify
+			minNodes = min(minNodes, len(members))
+			resultCh := make(chan error, minNodes)
+
+			// Shuffle and select random nodes
+			rand.Shuffle(len(members), func(i, j int) { members[i], members[j] = members[j], members[i] })
+			members = members[:minNodes]
+
+			// Send to selected nodes concurrently
+			for _, node := range members {
+				go func(n *Node) {
+					var err error
+					if n.Name != m.config.Name { // skip if local node
+						if err = m.sendDeadMsg(n.FullAddress(), &d); err != nil {
+							err = fmt.Errorf("failed to send leave message to %s: %v", n.Name, err)
+						}
+					}
+					resultCh <- err
+				}(node)
+			}
+
+			var successCount int
+			for range minNodes {
+				select {
+				case err := <-resultCh:
+					if err != nil {
+						m.logger.Printf("[WARN] memberlist: %s", err)
+					} else {
+						successCount++
+					}
+				case <-timeoutCh:
+					return fmt.Errorf("timeout: only notified %d of %d required nodes", successCount, minNodes)
+				}
+			}
+
+			// Check if we met the minimum requirement
+			if successCount < minNodes {
+				return fmt.Errorf("failed to notify minimum nodes: notified %d of %d required", successCount, minNodes)
+			}
+		}
+
 		// Block until the broadcast goes out
 		if m.anyAlive() {
-			var timeoutCh <-chan time.Time
-			if timeout > 0 {
-				timeoutCh = time.After(timeout)
-			}
 			select {
 			case <-m.leaveBroadcast:
 			case <-timeoutCh:

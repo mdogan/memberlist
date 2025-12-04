@@ -17,10 +17,11 @@ import (
 	"testing"
 	"time"
 
-	iretry "github.com/hashicorp/memberlist/internal/retry"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	iretry "github.com/hashicorp/memberlist/internal/retry"
 )
 
 var bindLock sync.Mutex
@@ -175,7 +176,7 @@ func TestCreate_protocolVersion(t *testing.T) {
 		{"min", ProtocolVersionMin, false},
 		{"max", ProtocolVersionMax, false},
 		// TODO(mitchellh): uncommon when we're over 0
-		//{"uncommon", ProtocolVersionMin - 1, true},
+		// {"uncommon", ProtocolVersionMin - 1, true},
 		{"max+1", ProtocolVersionMax + 1, true},
 		{"min-1", ProtocolVersionMax - 1, false},
 	}
@@ -1195,7 +1196,7 @@ func TestMemberlist_Leave(t *testing.T) {
 	}
 
 	// Leave
-	err = m1.Leave(time.Second)
+	err = m1.Leave(time.Second, 0)
 	require.NoError(t, err)
 
 	// Wait for leave
@@ -1213,6 +1214,71 @@ func TestMemberlist_Leave(t *testing.T) {
 	if m2.nodeMap[c1.Name].State != StateLeft {
 		t.Fatalf("bad state")
 	}
+}
+
+func TestMemberlist_LeaveGuaranteedDelivery(t *testing.T) {
+	newConfig := func() *Config {
+		c := testConfig(t)
+		c.GossipInterval = time.Millisecond
+		return c
+	}
+
+	// Create 4 nodes
+	nodes := make([]*Memberlist, 4)
+	for i := 0; i < 4; i++ {
+		c := newConfig()
+		if i > 0 {
+			c.BindPort = nodes[0].config.BindPort
+		}
+		m, err := Create(c)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			if err := m.Shutdown(); err != nil {
+				t.Fatal(err)
+			}
+		})
+		nodes[i] = m
+	}
+
+	// Join all nodes to the first node
+	for i := 1; i < 4; i++ {
+		_, err := nodes[i].Join([]string{nodes[0].config.Name + "/" + nodes[0].config.BindAddr})
+		require.NoError(t, err)
+	}
+
+	// Wait for cluster to stabilize
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify all nodes see each other
+	for i := 0; i < 4; i++ {
+		members := nodes[i].Members()
+		if len(members) != 4 {
+			t.Fatalf("node %d should see 4 members, got %d", i, len(members))
+		}
+	}
+
+	// Test guaranteed delivery: node 0 leaves and ensures at least 2 nodes are notified
+	err := nodes[0].Leave(5*time.Second, 2)
+	require.NoError(t, err, "Leave should succeed with minNodes=2")
+
+	// Wait a bit for the message to propagate
+	time.Sleep(100 * time.Millisecond)
+
+	// Check that at least 2 other nodes marked node 0 as left
+	leftCount := 0
+	for i := 1; i < 4; i++ {
+		nodes[i].nodeLock.RLock()
+		state, ok := nodes[i].nodeMap[nodes[0].config.Name]
+		nodes[i].nodeLock.RUnlock()
+		if ok && state.State == StateLeft {
+			leftCount++
+		}
+	}
+
+	if leftCount < 2 {
+		t.Fatalf("Expected at least 2 nodes to mark node 0 as left, got %d", leftCount)
+	}
+	t.Logf("Successfully notified %d nodes of leave", leftCount)
 }
 
 func TestMemberlist_JoinShutdown(t *testing.T) {
@@ -2146,7 +2212,7 @@ func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
 
 		name := pretty[m.config.Name]
 		t.Logf("Node %s[%s] is leaving %s", name, m.config.Name, why)
-		err := m.Leave(time.Second)
+		err := m.Leave(time.Second, 0)
 		require.NoError(t, err)
 	}
 
@@ -2323,7 +2389,7 @@ func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
 // OR we must disable the address conflict checking in memberlist.
 // I just comment out that code to test this case.
 //
-//func TestMemberlist_Restart_delegateMeta_Update(t *testing.T) {
+// func TestMemberlist_Restart_delegateMeta_Update(t *testing.T) {
 //    c1 := testConfig()
 //    c2 := testConfig()
 //    mock1 := &MockDelegate{meta: []byte("web")}
@@ -2412,7 +2478,7 @@ func TestMemberlist_EncryptedGossipTransition(t *testing.T) {
 //    if r := roles[c2.Name]; r != "lb" {
 //        t.Fatalf("bad role for %s: %s", c2.Name, r)
 //    }
-//}
+// }
 
 func runStep(t *testing.T, name string, fn func(t *testing.T)) {
 	t.Helper()

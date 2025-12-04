@@ -950,6 +950,33 @@ func (m *Memberlist) sendUserMsg(a Address, sendBuf []byte) error {
 	return m.rawSendMsgStream(conn, bufConn.Bytes(), m.config.Label)
 }
 
+// sendDeadMsg is used to reliably send a dead message to another host over TCP.
+// This is used during Leave() to ensure a minimum number of nodes receive the
+// leave notification.
+func (m *Memberlist) sendDeadMsg(a Address, d *dead) error {
+	if a.Name == "" && m.config.RequireNodeNames {
+		return errNodeNamesAreRequired
+	}
+
+	// Encode the dead message
+	buf, err := encode(deadMsg, d, m.config.MsgpackUseNewTimeFormat)
+	if err != nil {
+		return fmt.Errorf("failed to encode dead message: %w", err)
+	}
+
+	// Establish TCP connection
+	conn, err := m.transport.DialAddressTimeout(a, m.config.TCPTimeout)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = conn.Close()
+	}()
+
+	// Send the message
+	return m.rawSendMsgStream(conn, buf.Bytes(), m.config.Label)
+}
+
 // sendAndReceiveState is used to initiate a push/pull over a stream with a
 // remote host.
 func (m *Memberlist) sendAndReceiveState(a Address, join bool) ([]pushNodeState, []byte, error) {
@@ -1131,7 +1158,7 @@ func (m *Memberlist) decryptRemoteState(bufConn io.Reader, streamLabel string) (
 
 	}
 
-	//Start reporting the size before you cross the limit
+	// Start reporting the size before you cross the limit
 	if moreBytes > uint32(math.Floor(.6*maxPushStateBytes)) {
 		m.logger.Printf("[WARN] memberlist: Remote node state size is (%d) limit is (%d)", moreBytes, maxPushStateBytes)
 	}
